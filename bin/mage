@@ -136,6 +136,15 @@ def configure_prefix(recipe, runtime, prefix):
                                  "/d", "Y", "/f"], env=env)
         if result.returncode:
             die(f"prefix configuration failed ({result.returncode})")
+    # Route gamepads through IOHID -> XInput; this runtime has no winebus SDL backend.
+    bus = r"HKLM\System\CurrentControlSet\Services\winebus"
+    for name in ("Enable SDL", "DisableInput"):
+        value = "0" if name == "Enable SDL" else "1"
+        result = subprocess.run([wine, "reg", "add", bus, "/v", name, "/t", "REG_DWORD",
+                                 "/d", value, "/f"], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode:
+            print(f"mage: warning: could not set winebus {name}", file=sys.stderr)
 
 
 def cmd_list(_args):
@@ -213,7 +222,13 @@ def ensure_steam_wrapper(prefix):
     target = cef / "steamwebhelper.exe"
     real = cef / "steamwebhelper_real.exe"
     wrapper = MAGE_DIR / "tools" / "steamwebhelper-wrapper" / "steamwebhelper.exe"
-    if not target.is_file() or not wrapper.is_file():
+    if not wrapper.is_file():
+        print(f"mage: steamwebhelper wrapper skipped: {wrapper} not found "
+              "(build it in tools/steamwebhelper-wrapper)", file=sys.stderr)
+        return
+    if not target.is_file():
+        print(f"mage: steamwebhelper wrapper skipped: no Steam at {target} "
+              "(install/launch Steam in this prefix first)", file=sys.stderr)
         return
     wbytes = wrapper.read_bytes()
     tbytes = target.read_bytes()
