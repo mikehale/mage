@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -125,6 +126,63 @@ def run_env(recipe, runtime, prefix):
     return env
 
 
+def vkshim_dylib():
+    shim = MAGE_DIR / "tools" / "vkshim" / "prebuilt" / "libvulkan.1.dylib"
+    if not shim.is_file():
+        die("vkshim missing: tools/vkshim/prebuilt/libvulkan.1.dylib (reinstall Mage)")
+    return shim
+
+
+def runtime_files(recipe, runtime, env):
+    lib = runtime["root"] / "lib" / "wine"
+    files = []
+    if recipe.get("vkshim"):
+        shim = vkshim_dylib()
+        dirs = [lib / "x86_64-unix"]
+        if env.get("DYLD_LIBRARY_PATH"):
+            dirs.insert(0, Path(env["DYLD_LIBRARY_PATH"]))
+        files += [(shim, d / shim.name) for d in dirs]
+    if recipe.get("xinput_fix"):
+        src = MAGE_DIR / "tools" / "xinput-fix" / "x86_64-windows"
+        files += [(f, lib / "x86_64-windows" / f.name) for f in sorted(src.iterdir()) if f.is_file()]
+    return files
+
+
+def runtime_busy(runtime):
+    root = os.path.realpath(runtime["root"])
+    r = subprocess.run(["/bin/ps", "axo", "comm="],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    for comm in (line.strip() for line in r.stdout.splitlines()):
+        if os.path.basename(comm) != "wineserver":
+            continue
+        if "/" not in comm or os.path.realpath(comm).startswith(root + os.sep):
+            return True
+    return False
+
+
+def install_runtime_files(recipe, runtime, env):
+    stale = [(src, dst) for src, dst in runtime_files(recipe, runtime, env)
+             if dst.is_symlink() or not dst.is_file() or dst.read_bytes() != src.read_bytes()]
+    if not stale:
+        return
+    if runtime_busy(runtime):
+        die(f"runtime {recipe['runtime']} is in use (wineserver running); "
+            "quit Steam and games, then retry")
+    for src, dst in stale:
+        stock = dst.with_name(dst.name + ".stock")
+        if os.path.lexists(dst) and not os.path.lexists(stock):
+            if dst.is_symlink():
+                os.symlink(os.readlink(dst), stock)
+            else:
+                shutil.copy2(dst, stock)
+        tmp = dst.with_name(f".{dst.name}.mage-tmp")
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+        print(f"installed {src.relative_to(MAGE_DIR)} -> {dst}")
+
+
 def configure_prefix(recipe, runtime, prefix):
     wine = str(runtime["root"] / runtime["wine"])
     env = run_env(recipe, runtime, prefix)
@@ -162,6 +220,7 @@ def cmd_install(args):
     recipe = load_recipe(args.recipe)
     runtime = load_runtime(recipe["runtime"])
     name = args.name or recipe["id"]
+    install_runtime_files(recipe, runtime, run_env(recipe, runtime, PREFIXES_DIR / name))
     if args.import_prefix:
         prefix = Path(args.import_prefix).resolve()
         if not prefix.is_dir():
@@ -431,6 +490,7 @@ def cmd_run(args):
             print("setup " + " ".join(step))
         return
 
+    install_runtime_files(recipe, runtime, env)
     configure_prefix(recipe, runtime, prefix)
     ensure_steam_wrapper(prefix)
     run_setup(recipe, runtime, prefix, env)

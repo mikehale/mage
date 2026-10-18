@@ -1,0 +1,70 @@
+{
+  "env": {
+    "ROSETTA_ADVERTISE_AVX": "1",
+    "WINEDEBUG": "-all",
+    "WINEDLLOVERRIDES": "mscoree=d;mshtml=d",
+    "WINEESYNC": "0",
+    "WINEMSYNC": "1"
+  },
+  "id": "total-annihilation",
+  "launch": [
+    {
+      "args": [
+        "-silent",
+        "-nobootstrapupdate",
+        "-skipinitialbootstrap",
+        "-noverifyfiles",
+        "-cef-disable-gpu",
+        "-cef-disable-gpu-compositing"
+      ],
+      "background": true,
+      "program": "C:\\Program Files (x86)\\Steam\\steam.exe",
+      "then_wait": 20
+    },
+    {
+      "app_exes": [
+        "TotalA.exe"
+      ],
+      "args": [
+        "-applaunch",
+        "298030"
+      ],
+      "background": true,
+      "program": "C:\\Program Files (x86)\\Steam\\steam.exe"
+    }
+  ],
+  "runtime": "mage-wine-11.13-rt",
+  "setup": [
+    [
+      "tools/wine-reg/set.py",
+      "HKLM\\System\\CurrentControlSet\\Services\\winebus",
+      "Enable SDL",
+      "REG_DWORD",
+      "0",
+      "HKLM\\System\\CurrentControlSet\\Services\\winebus",
+      "DisableInput",
+      "REG_DWORD",
+      "1",
+      "HKCU\\Environment",
+      "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS",
+      "REG_SZ",
+      "1"
+    ],
+    [
+      "tools/cnc-ddraw/install.py",
+      "drive_c/Program Files (x86)/Steam/steamapps/common/Total Annihilation",
+      "TotalA.exe",
+      "fullscreen=true",
+      "windowed=true",
+      "maintas=true",
+      "renderer=opengl"
+    ],
+    [
+      "tools/dsetup/install.sh",
+      "drive_c/Program Files (x86)/Steam/steamapps/common/Total Annihilation"
+    ]
+  ],
+  "steam_appid": "298030",
+  "title": "Total Annihilation",
+  "xinput_fix": true
+}

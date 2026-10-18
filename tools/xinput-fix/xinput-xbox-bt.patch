@@ -1,0 +1,109 @@
+diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
+index 8530b02..40c0922 100644
+--- a/dlls/xinput1_3/main.c
++++ b/dlls/xinput1_3/main.c
+@@ -70,6 +70,7 @@ struct xinput_controller
+         HIDP_VALUE_CAPS rx_caps;
+         HIDP_VALUE_CAPS ry_caps;
+         HIDP_VALUE_CAPS rt_caps;
++        BOOL xbox_bt_layout, xbox_bt_gap_buttons, xbox_bt_ac_back;
+ 
+         OVERLAPPED read_ovl;
+ 
+@@ -234,6 +235,33 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
+         if (!caps->IsRange) check_value_caps(controller, caps->NotRange.Usage, caps);
+         else for (u = caps->Range.UsageMin; u <=caps->Range.UsageMax; u++) check_value_caps(controller, u, value_caps + i);
+     }
++    if (status == HIDP_STATUS_SUCCESS && !controller->hid.rx_caps.UsagePage && !controller->hid.ry_caps.UsagePage)
++    {
++        HIDP_VALUE_CAPS z = controller->hid.lt_caps, rz = controller->hid.rt_caps, brake = {0}, accel = {0};
++        for (i = 0; i < controller->hid.caps.NumberInputValueCaps; i++)
++        {
++            HIDP_VALUE_CAPS *vc = value_caps + i;
++            if (vc->UsagePage != HID_USAGE_PAGE_SIMULATION || vc->IsRange) continue;
++            if (vc->NotRange.Usage == HID_USAGE_SIMULATION_BRAKE) brake = *vc;
++            if (vc->NotRange.Usage == HID_USAGE_SIMULATION_ACCELERATOR) accel = *vc;
++        }
++        if (z.UsagePage && rz.UsagePage && brake.UsagePage && accel.UsagePage)
++        {
++            USAGE back = 0x224;
++            USHORT n = 1;
++            HIDP_BUTTON_CAPS bc;
++            controller->hid.xbox_bt_layout = TRUE;
++            controller->hid.rx_caps = z;
++            controller->hid.ry_caps = rz;
++            controller->hid.lt_caps = brake;
++            controller->hid.rt_caps = accel;
++            controller->hid.xbox_bt_gap_buttons = button_count >= 15;
++            controller->hid.xbox_bt_ac_back = HidP_GetSpecificButtonCaps(HidP_Input, HID_USAGE_PAGE_CONSUMER, 0, back,
++                                                                         &bc, &n, preparsed) == HIDP_STATUS_SUCCESS && n;
++            TRACE("using Xbox Bluetooth layout, gap buttons %u, AC Back %u\n",
++                  controller->hid.xbox_bt_gap_buttons, controller->hid.xbox_bt_ac_back);
++        }
++    }
+     free(value_caps);
+ 
+     if (!controller->hid.lt_caps.UsagePage) WARN("Missing axis LeftTrigger\n");
+@@ -605,6 +633,54 @@ static void read_controller_state(struct xinput_controller *controller)
+ 
+     get_current_state(controller - controllers, &state);
+ 
++    if (controller->hid.xbox_bt_layout)
++    {
++        static const WORD gap_map[16] = {0, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, 0, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, 0,
++            XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START,
++            XINPUT_GAMEPAD_GUIDE, XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB};
++        static const WORD seq_map[11] = {0, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
++            XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START,
++            XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB};
++        USAGE bt[32];
++        ULONG n = ARRAY_SIZE(bt);
++        static const WORD hat_map[9] = {0, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_RIGHT,
++            XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_DOWN,
++            XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_LEFT,
++            XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_UP};
++
++        state.Gamepad.wButtons = 0;
++        if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, bt, &n, controller->hid.preparsed,
++                           report_buf, report_len) != HIDP_STATUS_SUCCESS) n = 0;
++        for (i = 0; i < n; i++)
++        {
++            if (controller->hid.xbox_bt_gap_buttons) { if (bt[i] < ARRAY_SIZE(gap_map)) state.Gamepad.wButtons |= gap_map[bt[i]]; }
++            else if (bt[i] < ARRAY_SIZE(seq_map)) state.Gamepad.wButtons |= seq_map[bt[i]];
++        }
++        if (controller->hid.xbox_bt_ac_back)
++        {
++            n = ARRAY_SIZE(bt);
++            if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_CONSUMER, 0, bt, &n, controller->hid.preparsed,
++                               report_buf, report_len) != HIDP_STATUS_SUCCESS) n = 0;
++            for (i = 0; i < n; i++) if (bt[i] == 0x224) state.Gamepad.wButtons |= XINPUT_GAMEPAD_BACK;
++        }
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, HID_USAGE_GENERIC_HATSWITCH, &value,
++                               controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS && value <= 8)
++            state.Gamepad.wButtons |= hat_map[value];
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, HID_USAGE_GENERIC_X, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.sThumbLX = scale_value(value, &controller->hid.lx_caps, -32768, 32767);
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, HID_USAGE_GENERIC_Y, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.sThumbLY = -scale_value(value, &controller->hid.ly_caps, -32768, 32767) - 1;
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, HID_USAGE_GENERIC_Z, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.sThumbRX = scale_value(value, &controller->hid.rx_caps, -32768, 32767);
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, HID_USAGE_GENERIC_RZ, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.sThumbRY = -scale_value(value, &controller->hid.ry_caps, -32768, 32767) - 1;
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_SIMULATION, 0, HID_USAGE_SIMULATION_BRAKE, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.bLeftTrigger = scale_value(value, &controller->hid.lt_caps, 0, 255);
++        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_SIMULATION, 0, HID_USAGE_SIMULATION_ACCELERATOR, &value, controller->hid.preparsed, report_buf, report_len) == HIDP_STATUS_SUCCESS)
++            state.Gamepad.bRightTrigger = scale_value(value, &controller->hid.rt_caps, 0, 255);
++        goto done;
++    }
++
+     state.Gamepad.wButtons = 0;
+     for (i = 0; i < button_length; i++)
+     {
+@@ -670,6 +746,7 @@ static void read_controller_state(struct xinput_controller *controller)
+     if (status != HIDP_STATUS_SUCCESS) WARN("HidP_GetUsageValue HID_USAGE_PAGE_GENERIC / HID_USAGE_GENERIC_Z returned %#lx\n", status);
+     else state.Gamepad.bLeftTrigger = scale_value(value, &controller->hid.lt_caps, 0, 255);
+ 
++done:
+     if (controller->enabled)
+     {
+         set_current_state(controller - controllers, &state);

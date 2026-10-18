@@ -1,0 +1,59 @@
+{
+  "env": {
+    "ROSETTA_ADVERTISE_AVX": "1",
+    "WINEDEBUG": "-all",
+    "WINEDLLOVERRIDES": "mscoree=d;mshtml=d",
+    "WINEESYNC": "0",
+    "WINEMSYNC": "1"
+  },
+  "icon": "astrider-demo.icns",
+  "id": "astrider-demo",
+  "launch": [
+    {
+      "args": [
+        "-silent",
+        "-nobootstrapupdate",
+        "-skipinitialbootstrap",
+        "-noverifyfiles",
+        "-cef-disable-gpu",
+        "-cef-disable-gpu-compositing"
+      ],
+      "background": true,
+      "program": "C:\\Program Files (x86)\\Steam\\steam.exe",
+      "then_wait": 20
+    },
+    {
+      "app_exes": [
+        "astrider.exe"
+      ],
+      "args": [
+        "-applaunch",
+        "4950960"
+      ],
+      "background": true,
+      "program": "C:\\Program Files (x86)\\Steam\\steam.exe"
+    }
+  ],
+  "runtime": "mage-wine-11.13-rt",
+  "setup": [
+    [
+      "tools/wine-reg/set.py",
+      "HKLM\\System\\CurrentControlSet\\Services\\winebus",
+      "Enable SDL",
+      "REG_DWORD",
+      "0",
+      "HKLM\\System\\CurrentControlSet\\Services\\winebus",
+      "DisableInput",
+      "REG_DWORD",
+      "1",
+      "HKCU\\Environment",
+      "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS",
+      "REG_SZ",
+      "1"
+    ]
+  ],
+  "steam_appid": "4950960",
+  "title": "ASTRIDER Demo",
+  "vkshim": true,
+  "xinput_fix": true
+}
