@@ -177,14 +177,29 @@ def cmd_install(args):
         if r.returncode != 0:
             die(f"wineboot failed ({r.returncode})")
     configure_prefix(recipe, runtime, prefix)
-    marker = {"name": name, "recipe": recipe["id"], "prefix": str(prefix),
-              "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    with open(marker_path(prefix), "w") as f:
-        json.dump(marker, f, indent=2)
+    existing = load_json(marker_path(prefix)) if marker_path(prefix).exists() else None
+    shared = bool(existing) and existing.get("recipe") != recipe["id"]
+    if shared and not args.import_prefix:
+        name = recipe["id"] if name == existing.get("name") else name
+        register_import(name, prefix, recipe["id"])
+        print(f"registered '{name}' in shared bottle {prefix}")
+    elif not shared and not (args.import_prefix and existing and existing.get("name") != name):
+        marker = {"name": name, "recipe": recipe["id"], "prefix": str(prefix),
+                  "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        with open(marker_path(prefix), "w") as f:
+            json.dump(marker, f, indent=2)
     warns = file_checks(recipe, prefix)
     for w in warns:
         print(f"  warning: {w}")
     print(f"bottle '{name}' ready")
+
+
+def run_setup(recipe, runtime, prefix, env):
+    setup_env = dict(env, WINE=str(runtime["root"] / runtime["wine"]), MAGE_DIR=str(MAGE_DIR))
+    for step in recipe.get("setup", []):
+        r = subprocess.run([str(MAGE_DIR / step[0])] + step[1:], env=setup_env, cwd=prefix)
+        if r.returncode:
+            print(f"mage: warning: setup {step[0]} failed ({r.returncode})", file=sys.stderr)
 
 
 def file_checks(recipe, prefix):
@@ -412,10 +427,13 @@ def cmd_run(args):
             print(f"env MAGE_APP_NAME={app}")
             print(f"env MAGE_BACKGROUND_EXE={':'.join(BACKGROUND_EXES)}")
             print("run " + " ".join(s))
+        for step in recipe.get("setup", []):
+            print("setup " + " ".join(step))
         return
 
     configure_prefix(recipe, runtime, prefix)
     ensure_steam_wrapper(prefix)
+    run_setup(recipe, runtime, prefix, env)
     for w in file_checks(recipe, prefix):
         print(f"mage: warning: {w}", file=sys.stderr)
     lf = open(log, "w")
