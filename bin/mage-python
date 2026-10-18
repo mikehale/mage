@@ -1,0 +1,12 @@
+#!/bin/sh
+root=$(cd "$(dirname "$0")/.." && pwd -P)
+for py in "${MAGE_PYTHON:-}" "$root/dist/python/bin/python3"; do
+    [ -n "$py" ] && [ -x "$py" ] && exec "$py" "$@"
+done
+IFS=:
+for d in $PATH; do
+    [ "$d/python3" != /usr/bin/python3 ] && [ -x "$d/python3" ] && exec "$d/python3" "$@"
+done
+/usr/bin/xcode-select -p >/dev/null 2>&1 && exec /usr/bin/python3 "$@"
+echo "mage: no python3 found; install-mage-first-run.sh puts one in dist/python" >&2
+exit 127

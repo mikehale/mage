@@ -993,7 +993,9 @@ final class MageStore: ObservableObject {
     nonisolated private static func runBridge(
         root: URL, _ args: [String], env: [String: String] = [:]
     ) async -> [String: Any] {
-        let python = URL(fileURLWithPath: "/usr/bin/python3")
+        let bundled = root.appendingPathComponent("bin/mage-python")
+        let python = FileManager.default.isExecutableFile(atPath: bundled.path)
+            ? bundled : URL(fileURLWithPath: "/usr/bin/python3")
         let script = root.appendingPathComponent("tools/steam-bridge/bridge.py")
         let (out, code) = await exec(python, [script.path] + args, env: env)
         for line in out.split(separator: "\n").reversed() {

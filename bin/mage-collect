@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-"""mage-collect — bounded, full-spectrum runtime data collector for a Mage game.
+#!/bin/sh
+''''exec "$(dirname "$0")/mage-python" "$0" "$@" #'''
+__doc__ = """mage-collect — bounded, full-spectrum runtime data collector for a Mage game.
 
 Captures per-tick: CPU/RSS/threads per wine process of interest, GPU
 utilization + driver memory (IOAccelerator PerformanceStatistics), memory

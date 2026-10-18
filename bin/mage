@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-"""mage — Windows games, native on Apple silicon. 0.1 alpha CLI."""
+#!/bin/sh
+''''exec "$(dirname "$0")/mage-python" "$0" "$@" #'''
+__doc__ = """mage — Windows games, native on Apple silicon. 0.1 alpha CLI."""
 import argparse
 import json
 import os
@@ -256,7 +257,10 @@ def cmd_install(args):
 def run_setup(recipe, runtime, prefix, env):
     setup_env = dict(env, WINE=str(runtime["root"] / runtime["wine"]), MAGE_DIR=str(MAGE_DIR))
     for step in recipe.get("setup", []):
-        r = subprocess.run([str(MAGE_DIR / step[0])] + step[1:], env=setup_env, cwd=prefix)
+        cmd = [str(MAGE_DIR / step[0])] + step[1:]
+        if step[0].endswith(".py"):
+            cmd.insert(0, sys.executable)
+        r = subprocess.run(cmd, env=setup_env, cwd=prefix)
         if r.returncode:
             print(f"mage: warning: setup {step[0]} failed ({r.returncode})", file=sys.stderr)
 
