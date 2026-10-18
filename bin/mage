@@ -313,7 +313,7 @@ def ensure_steam_wrapper(prefix):
         print("mage: steamwebhelper wrapper locked (uchg)")
 
 
-def ensure_app_launcher(runtime, name, display=None):
+def ensure_app_launcher(runtime, name, display=None, bundle=None):
     """Create/update a copy of the wine loader named after the app (patched
     embedded Info.plist) so the Dock/menu bar show e.g. "Steam" not "Wine".
     mage-wine's ntdll execs it when MAGE_APP_NAME is set. Idempotent.
@@ -327,6 +327,8 @@ def ensure_app_launcher(runtime, name, display=None):
         bundleid = 'app.mage.' + ''.join(
             c.lower() if c.isalnum() else '-' for c in name).strip('-')
         cmd += [bundleid, display]
+    if bundle:
+        cmd += ["--bundle", str(bundle)]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -417,6 +419,23 @@ def exe_cwd(prefix, program):
     return None
 
 
+LAUNCHERS = Path.home() / "Library/Application Support/Mage/Launchers"
+
+
+def launcher_app(recipe, name):
+    title = recipe.get("title") or name
+    safe = " ".join("".join(c if c.isalnum() or c in " -_" else " "
+                             for c in title).split())
+    bundleid = "app.mage.launcher." + "-".join(
+        "".join(c.lower() if c.isalnum() else " " for c in title).split())
+    return LAUNCHERS / f"{safe}.app", safe, bundleid
+
+
+def bundled_apps(recipe):
+    return {app_name_for(e) for e in app_exes_union(recipe).split(":")
+            if e and e.lower() not in BACKGROUND_EXES}
+
+
 def cmd_launcher(args):
     """Create (idempotently) a minimal per-game .app that runs this bottle,
     and print its path. Launching through LaunchServices (`open`,
@@ -426,30 +445,38 @@ def cmd_launcher(args):
     presence is momentary; the game's named sibling loader keeps identity."""
     meta, _prefix = find_bottle(args.name)
     recipe = load_recipe(meta["recipe"])
-    title = recipe.get("title") or args.name
-    safe = " ".join("".join(c if c.isalnum() or c in " -_" else " "
-                             for c in title).split())
-    bundleid = "app.mage.launcher." + "-".join(
-        "".join(c.lower() if c.isalnum() else " " for c in title).split())
-    app = (Path.home() / "Library/Application Support/Mage/Launchers"
-           / f"{safe}.app")
+    app, safe, bundleid = launcher_app(recipe, args.name)
     exe = app / "Contents/MacOS/launcher"
     script = f'#!/bin/sh\nexec "{MAGE_DIR}/bin/mage" run "{args.name}"\n'
+    icon = MAGE_DIR / "recipes" / recipe["icon"] if recipe.get("icon") else None
+    icon_key = f"<key>CFBundleIconFile</key><string>{icon.name}</string>\n" if icon else ""
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>launcher</string>
-<key>CFBundleIdentifier</key><string>{bundleid}</string>
+{icon_key}<key>CFBundleIdentifier</key><string>{bundleid}</string>
 <key>CFBundleName</key><string>{safe}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>LSUIElement</key><true/>
 </dict></plist>
 """
-    if not exe.exists() or exe.read_text() != script:
+    info = app / "Contents/Info.plist"
+    if not exe.exists() or exe.read_text() != script or not info.exists() or info.read_text() != plist:
         exe.parent.mkdir(parents=True, exist_ok=True)
         exe.write_text(script)
         exe.chmod(0o755)
-        (app / "Contents/Info.plist").write_text(plist)
+        info.write_text(plist)
+        os.utime(app)
+    if icon and icon.is_file():
+        res = app / "Contents/Resources" / icon.name
+        if not res.is_file() or res.read_bytes() != icon.read_bytes():
+            res.parent.mkdir(parents=True, exist_ok=True)
+            res.write_bytes(icon.read_bytes())
+            os.utime(app)
+    runtime = load_runtime(recipe["runtime"])
+    for name in bundled_apps(recipe):
+        ensure_app_launcher(runtime, name, bundle=app)
     print(app)
 
 
@@ -464,25 +491,32 @@ def cmd_run(args):
     steps = []
     all_exes = app_exes_union(recipe)
     session_exes = session_app_exes(all_exes)
+    launcher = launcher_app(recipe, args.name)[0]
+    bundled = bundled_apps(recipe) if launcher.is_dir() else set()
     for st in recipe.get("launch", []):
         app = app_name_for(st["program"])
-        ensure_app_launcher(runtime, app)
+        ensure_app_launcher(runtime, app, bundle=launcher if app in bundled else None)
         steps.append((app, [wine, st["program"]] + st.get("args", [])))
     # named loaders for every allowlisted exe (the loader derives the Dock
     # name from the exe itself when a helper re-spawns the game)
     for exe in session_exes.split(":"):
-        if exe:
-            ensure_app_launcher(runtime, app_name_for(exe))
+        if exe and exe.lower() != "steamwebhelper_real.exe":
+            name = app_name_for(exe)
+            ensure_app_launcher(runtime, name, bundle=launcher if name in bundled else None)
     # the Steam UI process shows as "Steam", not "Steamwebhelper_real"
     if "steamwebhelper_real.exe" in session_exes.lower():
-        ensure_app_launcher(runtime, "Steamwebhelper_real", display="Steam")
+        ensure_app_launcher(runtime, "Steamwebhelper_real", display="Steam",
+                            bundle=LAUNCHERS / ".mage" / "Steam.app")
 
+    warm = any(steam_start(st) for st in recipe.get("launch", [])) and steam_running(prefix)
+    plan = launch_plan(recipe, steps, warm)
     if args.dry_run:
         print(f"log: {log}")
+        print(f"steam: {'warm' if warm else 'cold'}")
         for k in sorted(env):
             if k.startswith(("WINE", "ROSETTA", "MTL", "MVK", "DYLD")):
                 print(f"env {k}={env[k]}")
-        for st, (app, s) in zip(recipe.get("launch", []), steps):
+        for st, app, s in plan:
             print(f"env MAGE_APP_NAME={app}")
             print(f"env MAGE_BACKGROUND_EXE={':'.join(BACKGROUND_EXES)}")
             print("run " + " ".join(s))
@@ -497,11 +531,13 @@ def cmd_run(args):
     for w in file_checks(recipe, prefix):
         print(f"mage: warning: {w}", file=sys.stderr)
     lf = open(log, "w")
-    for st, (app, cmd) in zip(recipe.get("launch", []), steps):
+    for st, app, cmd in plan:
         step_env = dict(env, MAGE_APP_NAME=app,
                         MAGE_BACKGROUND_EXE=":".join(BACKGROUND_EXES))
+        if is_steam(st):
+            step_env.pop("MAGE_FORCE_ACTIVATION", None)
         cwd = exe_cwd(prefix, st["program"])
-        print(f"mage: {' '.join([cmd[1]] + st.get('args', []))}")
+        print(f"mage: {' '.join(cmd[1:])}")
         if st.get("background", True):
             subprocess.Popen(cmd, env=step_env, stdout=lf, stderr=subprocess.STDOUT,
                              cwd=cwd, start_new_session=True)
@@ -513,6 +549,36 @@ def cmd_run(args):
             print(f"mage: waiting {wait}s")
             time.sleep(wait)
     print(f"mage: launched '{args.name}' (log: {log})")
+
+
+def is_steam(st):
+    return exe_basename(st["program"]).lower() == "steam.exe"
+
+
+def steam_start(st):
+    return is_steam(st) and "-silent" in st.get("args", [])
+
+
+def steam_running(prefix):
+    procs = [c.lower() for _, c in prefix_processes(prefix)]
+    return any("wineserver" in c for c in procs) and \
+        any(re.search(r"(^|[\\/])steam\.exe(\s|$)", c) for c in procs)
+
+
+def launch_plan(recipe, steps, warm):
+    plan = [(st, app, cmd) for st, (app, cmd) in zip(recipe.get("launch", []), steps)]
+    start = next((i for i, p in enumerate(plan) if steam_start(p[0])), None)
+    if start is None:
+        return plan
+    if warm:
+        return plan[:start] + plan[start + 1:]
+    later = [p for p in plan[start + 1:] if is_steam(p[0])]
+    if not later:
+        return plan
+    st, app, cmd = plan[start]
+    extra = [a for p in later for a in p[0].get("args", [])]
+    head = (dict(st, then_wait=0), app, cmd + extra)
+    return plan[:start] + [head] + [p for p in plan[start + 1:] if p not in later]
 
 
 STEAM_EXE = r"C:\Program Files (x86)\Steam\steam.exe"

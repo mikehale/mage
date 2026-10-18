@@ -17,7 +17,7 @@ struct LaunchStep: Codable, Hashable {
     var thenWait: Int?
     var appExes: [String]?
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case program, args, background
         case thenWait = "then_wait"
         case appExes = "app_exes"
@@ -34,11 +34,38 @@ struct Recipe: Codable, Identifiable, Hashable {
     var fileChecks: [FileCheck]?
     var launch: [LaunchStep]?
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case id, title, runtime, env, launch
         case steamAppid = "steam_appid"
         case fileChecks = "file_checks"
         case vulkanLibraryPath = "vulkan_library_path"
+    }
+
+    static func data(_ recipe: Recipe, keepingUnknownKeysFrom url: URL) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(recipe) else { return nil }
+        guard var new = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let oldData = try? Data(contentsOf: url),
+              let old = (try? JSONSerialization.jsonObject(with: oldData)) as? [String: Any]
+        else { return data }
+        let known = Set(CodingKeys.allCases.map(\.stringValue))
+        for (key, value) in old where !known.contains(key) && new[key] == nil {
+            new[key] = value
+        }
+        if var steps = new["launch"] as? [[String: Any]],
+           let oldSteps = old["launch"] as? [[String: Any]] {
+            let stepKnown = Set(LaunchStep.CodingKeys.allCases.map(\.stringValue))
+            for i in steps.indices where i < oldSteps.count
+                && oldSteps[i]["program"] as? String == steps[i]["program"] as? String {
+                for (key, value) in oldSteps[i] where !stepKnown.contains(key) && steps[i][key] == nil {
+                    steps[i][key] = value
+                }
+            }
+            new["launch"] = steps
+        }
+        return (try? JSONSerialization.data(
+            withJSONObject: new, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? data
     }
 }
 
@@ -115,6 +142,11 @@ struct LibraryEntry: Identifiable, Hashable {
 enum MageRoot {
     static let overrideKey = "MageRootOverride"
 
+    static var applicationSupport: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Mage")
+    }
+
     static func isValid(_ url: URL) -> Bool {
         FileManager.default.isExecutableFile(
             atPath: url.appendingPathComponent("bin/mage").path)
@@ -136,6 +168,7 @@ enum MageRoot {
             .deletingLastPathComponent()  // app
             .deletingLastPathComponent()  // mage
         if isValid(bundleRelative) { return bundleRelative }
+        if isValid(applicationSupport) { return applicationSupport }
         return nil
     }
 
@@ -161,6 +194,7 @@ enum MageRoot {
             .deletingLastPathComponent()  // .build
             .deletingLastPathComponent()  // app
             .deletingLastPathComponent()) // mage
+        urls.append(applicationSupport)
         urls.append(FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Projects/macgaming/mage"))
         var seen = Set<String>()
@@ -207,6 +241,7 @@ final class MageStore: ObservableObject {
     }
 
     init() {
+        _root = Published(initialValue: MageRoot.resolve())
         _steamAPIKey = Published(
             initialValue: UserDefaults.standard.string(forKey: "SteamAPIKey") ?? "")
     }
@@ -693,14 +728,13 @@ final class MageStore: ObservableObject {
 
     func saveRecipe(_ recipe: Recipe) {
         guard let root else { return }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(recipe) else {
+        let url = root.appendingPathComponent("recipes/\(recipe.id).json")
+        guard let data = Recipe.data(recipe, keepingUnknownKeysFrom: url) else {
             statusLine = "failed to encode recipe"
             return
         }
         do {
-            try data.write(to: root.appendingPathComponent("recipes/\(recipe.id).json"))
+            try data.write(to: url)
             load()
             statusLine = "recipe \(recipe.id) saved"
         } catch {
@@ -943,6 +977,11 @@ final class MageStore: ObservableObject {
                 let name = base.prefix(1).uppercased() + base.dropFirst()
                 if !out.contains(name) { out.append(name) }
             }
+        }
+        if !out.isEmpty, let title = recipe.title {
+            let safe = String(title.map { $0.isLetter || $0.isNumber || " -_".contains($0) ? $0 : " " })
+                .split(separator: " ").joined(separator: " ")
+            if !safe.isEmpty, !out.contains(safe) { out.insert(safe, at: 0) }
         }
         return out
     }

@@ -19,8 +19,14 @@ Output: lib/wine/x86_64-unix/<AppName> next to the original loader.
 Refreshes the copy when missing or older than the original loader.
 """
 import os
+import plistlib
+import re
 import struct
+import subprocess
 import sys
+
+CODESIGN = '/usr/bin/codesign'
+LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 
 
 def patch(src, dst, appname, bundleid, display=None):
@@ -32,15 +38,16 @@ def patch(src, dst, appname, bundleid, display=None):
     ncmds = struct.unpack_from('<I', data, 16)[0]
     off = 32
     sect = None
+    offsets = []
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from('<II', data, off)
         if cmd == 0x19:  # LC_SEGMENT_64
             nsects = struct.unpack_from('<I', data, off + 64)[0]
             so = off + 72
             for _ in range(nsects):
+                offsets.append(struct.unpack_from('<I', data, so + 48)[0])
                 if data[so:so + 16].split(b'\0')[0] == b'__info_plist':
                     sect = so
-                    break
                 so += 80
         off += cmdsize
     assert sect is not None, "no __info_plist section"
@@ -50,25 +57,105 @@ def patch(src, dst, appname, bundleid, display=None):
     xml = xml.replace(b'<string>Wine</string>', f'<string>{display}</string>'.encode())
     xml = xml.replace(b'<string>wine</string>', f'<string>{appname}</string>'.encode(), 1)
     xml = xml.replace(b'org.winehq.wine', bundleid.encode())
-    assert foff + len(xml) <= len(data), "no file slack after __info_plist"
-    data[foff:foff + len(xml)] = xml
+    xml = re.sub(rb'>\s+<', b'><', xml).strip() + b'\n'
+    limit = min([o for o in offsets if o > foff] + [len(data)])
+    assert foff + len(xml) <= limit, "plist overflows __info_plist"
+    pad = max(size - len(xml), 0)
+    data[foff:foff + len(xml) + pad] = xml + bytes(pad)
     struct.pack_into('<Q', data, sect + 40, len(xml))
-    with open(dst, 'wb') as f:
+    tmp = dst + '.tmp'
+    with open(tmp, 'wb') as f:
         f.write(bytes(data))
-    os.chmod(dst, 0o755)
+    os.chmod(tmp, 0o755)
+    sign(tmp, bundleid)
+    os.replace(tmp, dst)
+
+
+def sign(path, ident):
+    subprocess.run([CODESIGN, '-f', '-s', '-', '-i', ident, path], capture_output=True)
+
+
+def embedded_name(path):
+    m = re.search(rb'<key>CFBundleName</key>\s*<string>([^<]*)</string>', open(path, 'rb').read())
+    return m.group(1).decode() if m else None
+
+
+def prebuilt_tramp():
+    tramp = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prebuilt', 'mage-tramp')
+    return tramp if os.access(tramp, os.X_OK) else None
+
+
+def link_ntdll(unix, d):
+    target = os.path.realpath(os.path.join(unix, 'ntdll.so'))
+    link = os.path.join(d, 'ntdll.so')
+    if os.path.realpath(link) != target:
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(target, link)
+
+
+def bundle(install, appname, bundleid, display, app):
+    tramp = prebuilt_tramp()
+    if not tramp:
+        return False
+    unix = os.path.join(install, 'lib', 'wine', 'x86_64-unix')
+    loader = os.path.join(unix, 'wine')
+    info = os.path.join(app, 'Contents', 'Info.plist')
+    if os.path.exists(info):
+        with open(info, 'rb') as f:
+            d = plistlib.load(f)
+        bundleid, display = d.get('CFBundleIdentifier', bundleid), d.get('CFBundleName', display)
+    else:
+        os.makedirs(os.path.dirname(info), exist_ok=True)
+        with open(info, 'wb') as f:
+            plistlib.dump({'CFBundleExecutable': appname, 'CFBundleIdentifier': bundleid,
+                           'CFBundleName': display, 'CFBundlePackageType': 'APPL',
+                           'LSUIElement': True}, f)
+    inner = os.path.join(app, 'Contents', 'MacOS', appname)
+    plain = os.path.join(unix, 'mage-plain', appname)
+    dst = os.path.join(unix, appname)
+    cfg = dst + '.bundle-loader'
+    newest = max(os.path.getmtime(p) for p in (loader, info, tramp))
+    if all(os.path.exists(p) and os.path.getmtime(p) >= newest for p in (inner, plain, dst, cfg)) \
+            and open(cfg).read().strip() == inner:
+        print(f"up to date: {dst} -> {inner}")
+        return True
+    for p in (inner, plain):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        patch(loader, p, appname, bundleid, display)
+        link_ntdll(unix, os.path.dirname(p))
+    with open(cfg, 'w') as f:
+        f.write(inner + '\n')
+    with open(tramp, 'rb') as f, open(dst + '.tmp', 'wb') as g:
+        g.write(f.read())
+    os.chmod(dst + '.tmp', 0o755)
+    sign(dst + '.tmp', bundleid)
+    os.replace(dst + '.tmp', dst)
+    subprocess.run([LSREGISTER, '-f', app])
+    print(f"created: {dst} -> {inner} (bundle id {bundleid})")
+    return True
 
 
 def main():
-    install, appname = sys.argv[1], sys.argv[2]
-    bundleid = sys.argv[3] if len(sys.argv) > 3 else \
+    args = sys.argv[1:]
+    app = None
+    if '--bundle' in args:
+        i = args.index('--bundle')
+        app = args[i + 1]
+        del args[i:i + 2]
+    install, appname = args[0], args[1]
+    bundleid = args[2] if len(args) > 2 else \
         'app.mage.' + ''.join(c.lower() if c.isalnum() else '-' for c in appname).strip('-')
     # optional 4th arg: display name when it differs from the loader file
     # name (e.g. loader "Steamwebhelper_real" shows as "Steam" — ntdll picks
     # the loader by exe-derived name, Launch Services shows the plist name)
-    display = sys.argv[4] if len(sys.argv) > 4 else appname
+    display = args[3] if len(args) > 3 else appname
+    if app and bundle(install, appname, bundleid, display, app):
+        return
     loader = os.path.join(install, 'lib', 'wine', 'x86_64-unix', 'wine')
     dst = os.path.join(install, 'lib', 'wine', 'x86_64-unix', appname)
-    if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(loader):
+    if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(loader) \
+            and embedded_name(dst) == display:
         print(f"up to date: {dst}")
         return
     patch(loader, dst, appname, bundleid, display)
